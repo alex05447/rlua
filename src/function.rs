@@ -1,4 +1,4 @@
-use std::os::raw::c_int;
+use std::os::raw::{c_int, c_void};
 use std::ptr;
 
 use crate::error::{Error, Result};
@@ -160,5 +160,47 @@ impl<'lua> Function<'lua> {
 
             Ok(Function(lua.pop_ref()))
         }
+    }
+
+    /// Dumps the function bytecode using [`lua_dump`](https://www.lua.org/manual/5.3/manual.html#lua_dump).
+    pub fn dump(&self) -> Result<Box<[u8]>> {
+        let lua = self.0.lua;
+
+        let bytes = unsafe {
+            let _sg = StackGuard::new(lua.state);
+            check_stack(lua.state, 1)?;
+
+            lua.push_ref(&self.0);
+
+            let mut bytes = Vec::<u8>::new();
+
+            let ud = &mut bytes as *const _ as *mut c_void;
+
+            let ret = ffi::lua_dump(lua.state, lua_Writer_impl, ud);
+
+            if ret != ffi::LUA_OK {
+                return Err(Error::MemoryError("Failed to write the function bytecode - out of memory?".to_owned()));
+            }
+
+            bytes.into_boxed_slice()
+        };
+
+        Ok(bytes)
+    }
+}
+
+#[allow(non_snake_case)]
+extern "C" fn lua_Writer_impl(_state: *mut ffi::lua_State, p: *const c_void, sz: usize, ud: *mut c_void) -> c_int {
+    use std::io::Write;
+
+    let bytes: &mut Vec<u8> = unsafe { &mut *(ud as *mut _) };
+
+    let src: &[u8] = unsafe { std::slice::from_raw_parts(p as *const _, sz) };
+
+    match bytes.write(src) {
+        Ok(written) => {
+            if written == sz { 0 } else { 1 }
+        },
+        Err(_) => { 1 },
     }
 }

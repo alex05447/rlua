@@ -21,6 +21,7 @@ pub type lua_KFunction =
     unsafe extern "C" fn(state: *mut lua_State, status: c_int, ctx: lua_KContext) -> c_int;
 pub type lua_CFunction = unsafe extern "C" fn(state: *mut lua_State) -> c_int;
 pub type lua_Hook = unsafe extern "C" fn(state: *mut lua_State, ar: *mut lua_Debug);
+pub type lua_Writer = unsafe extern "C" fn(state: *mut lua_State, p: *const c_void, sz: usize, ud: *mut c_void) -> c_int;
 
 #[repr(C)]
 pub struct lua_Debug {
@@ -214,6 +215,8 @@ extern "C" {
     );
     pub fn luaL_len(push_state: *mut lua_State, index: c_int) -> lua_Integer;
     pub fn luaL_tolstring(state: *mut lua_State, index: c_int, len: *mut usize) -> *const c_char;
+
+    pub fn lua_dump(state: *mut lua_State, writer: lua_Writer, data: *mut c_void) -> c_int;
 }
 
 // The following are re-implementations of what are macros in the Lua C API
