@@ -837,7 +837,10 @@ impl<'lua> Context<'lua> {
         source: &[u8],
         name: Option<&CString>,
         env: Option<Value<'lua>>,
+        binary: bool,
     ) -> Result<Function<'lua>> {
+        let mode = if binary { cstr!("b") } else { cstr!("t") };
+
         unsafe {
             let _sg = StackGuard::new(self.state);
             assert_stack(self.state, 1);
@@ -848,7 +851,7 @@ impl<'lua> Context<'lua> {
                     source.as_ptr() as *const c_char,
                     source.len(),
                     name.as_ptr() as *const c_char,
-                    cstr!("t"),
+                    mode,
                 )
             } else {
                 ffi::luaL_loadbufferx(
@@ -856,7 +859,7 @@ impl<'lua> Context<'lua> {
                     source.as_ptr() as *const c_char,
                     source.len(),
                     ptr::null(),
-                    cstr!("t"),
+                    mode,
                 )
             } {
                 ffi::LUA_OK => {
@@ -933,7 +936,7 @@ impl<'lua, 'a> Chunk<'lua, 'a> {
         expression_source.extend(self.source);
         if let Ok(function) =
             self.context
-                .load_chunk(&expression_source, self.name.as_ref(), self.env.clone())
+                .load_chunk(&expression_source, self.name.as_ref(), self.env.clone(), false)
         {
             function.call(())
         } else {
@@ -950,10 +953,21 @@ impl<'lua, 'a> Chunk<'lua, 'a> {
 
     /// Load this chunk into a regular `Function`.
     ///
-    /// This simply compiles the chunk without actually executing it.  
+    /// This simply compiles the chunk without actually executing it.
     pub fn into_function(self) -> Result<Function<'lua>> {
         self.context
-            .load_chunk(self.source, self.name.as_ref(), self.env)
+            .load_chunk(self.source, self.name.as_ref(), self.env, false)
+    }
+
+    /// Load this chunk into a regular `Function`.
+    ///
+    /// This simply loads the precompiled, binary chunk without actually executing it.
+    ///
+    /// It's up to the user to ensure that the chunk contains valid bytecode
+    /// (like that obtained by [`Function::dump`](struct.Function.html#method.dump)).
+    pub unsafe fn into_function_binary(self) -> Result<Function<'lua>> {
+        self.context
+            .load_chunk(self.source, self.name.as_ref(), self.env, true)
     }
 }
 
