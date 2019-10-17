@@ -176,7 +176,7 @@ impl<'lua> Function<'lua> {
 
             let ud = &mut bytes as *const _ as *mut c_void;
 
-            let ret = ffi::lua_dump(lua.state, lua_Writer_impl, ud);
+            let ret = ffi::lua_dump(lua.state, lua_Writer_impl, ud, 1);
 
             if ret != ffi::LUA_OK {
                 return Err(Error::MemoryError("Failed to write the function bytecode - out of memory?".to_owned()));
