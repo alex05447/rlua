@@ -1,11 +1,11 @@
 use std::any::TypeId;
 use std::cell::RefCell;
 use std::ffi::CString;
+use std::iter::{once, Iterator, Once};
 use std::marker::PhantomData;
 use std::os::raw::{c_char, c_int, c_void};
 use std::sync::Arc;
 use std::{mem, ptr};
-use std::iter::{Iterator, once, Once};
 
 use crate::error::{Error, Result};
 use crate::ffi;
@@ -865,14 +865,16 @@ impl<'lua> Context<'lua> {
             assert_stack(self.state, 1);
 
             #[allow(non_snake_case)]
-            unsafe extern "C" fn lua_Reader<'s, S: Iterator<Item = &'s [u8]>>(_state: *mut ffi::lua_State, data: *mut c_void, size: *mut usize) -> *const c_char {
-                debug_assert!(!data.is_null());
+            unsafe extern "C" fn lua_Reader_impl<'s, S: Iterator<Item = &'s [u8]>>(
+                _state: *mut ffi::lua_State,
+                data: *mut c_void,
+                size: *mut usize,
+            ) -> *const c_char {
                 let source: &mut S = &mut *(data as *mut _);
 
                 if let Some(source) = source.next() {
                     *size = source.len();
                     source.as_ptr() as *const _
-
                 } else {
                     *size = 0;
                     ptr::null_mut()
@@ -880,13 +882,16 @@ impl<'lua> Context<'lua> {
             }
 
             match ffi::lua_load(
-                    self.state,
-                    lua_Reader::<'s, S>,
-                    &source as *const _ as _,
-                    if let Some(name) = name { name.as_ptr() as *const c_char } else { ptr::null() },
-                    mode,
-                )
-            {
+                self.state,
+                lua_Reader_impl::<'s, S>,
+                &source as *const _ as _,
+                if let Some(name) = name {
+                    name.as_ptr() as *const c_char
+                } else {
+                    ptr::null()
+                },
+                mode,
+            ) {
                 ffi::LUA_OK => {
                     if let Some(env) = env {
                         self.push_value(env)?;
@@ -988,15 +993,12 @@ impl<'lua, 's, S: Iterator<Item = &'s [u8]> + Clone> Chunk<'lua, 's, S> {
         // actual lua repl does.
         let expression_source = once(b"return " as &[u8]).chain(self.source.clone());
 
-        if let Ok(function) =
-            self.context
-                .load_chunk(
-                    expression_source,
-                    self.name.as_ref(),
-                    self.env.clone(),
-                    false
-                )
-        {
+        if let Ok(function) = self.context.load_chunk(
+            expression_source,
+            self.name.as_ref(),
+            self.env.clone(),
+            false,
+        ) {
             function.call(())
         } else {
             self.call(())

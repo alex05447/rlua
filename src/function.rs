@@ -179,7 +179,9 @@ impl<'lua> Function<'lua> {
             let ret = ffi::lua_dump(lua.state, lua_Writer_impl, ud, 1);
 
             if ret != ffi::LUA_OK {
-                return Err(Error::MemoryError("Failed to write the function bytecode - out of memory?".to_owned()));
+                return Err(Error::MemoryError(
+                    "Failed to write the function bytecode - out of memory?".to_owned(),
+                ));
             }
 
             bytes.into_boxed_slice()
@@ -190,17 +192,26 @@ impl<'lua> Function<'lua> {
 }
 
 #[allow(non_snake_case)]
-extern "C" fn lua_Writer_impl(_state: *mut ffi::lua_State, p: *const c_void, sz: usize, ud: *mut c_void) -> c_int {
+unsafe extern "C" fn lua_Writer_impl(
+    _state: *mut ffi::lua_State,
+    p: *const c_void,
+    sz: usize,
+    ud: *mut c_void,
+) -> c_int {
     use std::io::Write;
 
-    let bytes: &mut Vec<u8> = unsafe { &mut *(ud as *mut _) };
+    let bytes: &mut Vec<u8> = &mut *(ud as *mut _);
 
-    let src: &[u8] = unsafe { std::slice::from_raw_parts(p as *const _, sz) };
+    let src: &[u8] = std::slice::from_raw_parts(p as *const _, sz);
 
     match bytes.write(src) {
         Ok(written) => {
-            if written == sz { 0 } else { 1 }
-        },
-        Err(_) => { 1 },
+            if written == sz {
+                0
+            } else {
+                1
+            }
+        }
+        Err(_) => 1,
     }
 }
