@@ -22,6 +22,7 @@ pub type lua_KFunction =
 pub type lua_CFunction = unsafe extern "C" fn(state: *mut lua_State) -> c_int;
 pub type lua_Hook = unsafe extern "C" fn(state: *mut lua_State, ar: *mut lua_Debug);
 pub type lua_Writer = unsafe extern "C" fn(state: *mut lua_State, p: *const c_void, sz: usize, ud: *mut c_void) -> c_int;
+pub type lua_Reader = unsafe extern "C" fn(state: *mut lua_State, data: *mut c_void, size: *mut usize) -> *const c_char;
 
 #[repr(C)]
 pub struct lua_Debug {
@@ -197,11 +198,11 @@ extern "C" {
         glb: c_int,
     );
 
-    pub fn luaL_loadbufferx(
+    pub fn lua_load(
         state: *mut lua_State,
-        buf: *const c_char,
-        size: usize,
-        name: *const c_char,
+        reader: lua_Reader,
+        data: *mut c_void,
+        chunkname: *const c_char,
         mode: *const c_char,
     ) -> c_int;
     pub fn luaL_ref(state: *mut lua_State, table: c_int) -> c_int;

@@ -5,6 +5,7 @@ use std::marker::PhantomData;
 use std::os::raw::{c_char, c_int, c_void};
 use std::sync::Arc;
 use std::{mem, ptr};
+use std::iter::{Iterator, once, Once};
 
 use crate::error::{Error, Result};
 use crate::ffi;
@@ -39,13 +40,31 @@ impl<'lua> Context<'lua> {
     /// called.
     ///
     /// [`Chunk::exec`]: struct.Chunk.html#method.exec
-    pub fn load<'a, S>(self, source: &'a S) -> Chunk<'lua, 'a>
+    pub fn load<'a, S>(self, source: &'a S) -> Chunk<'lua, 'a, Once<&'a [u8]>>
     where
         S: ?Sized + AsRef<[u8]>,
     {
         Chunk {
             context: self,
-            source: source.as_ref(),
+            source: once(source.as_ref()),
+            name: None,
+            env: None,
+        }
+    }
+
+    /// Returns Lua source code as a `Chunk` builder type.
+    ///
+    /// `source` is an iterator which returns the source code in chunks of bytes.
+    ///
+    /// In order to actually compile or run the resulting code, you must call [`Chunk::exec`] or
+    /// similar on the returned builder.  Code is not even parsed until one of these methods is
+    /// called.
+    ///
+    /// [`Chunk::exec`]: struct.Chunk.html#method.exec
+    pub fn load_ex<'s, S: Iterator<Item = &'s [u8]>>(self, source: S) -> Chunk<'lua, 's, S> {
+        Chunk {
+            context: self,
+            source,
             name: None,
             env: None,
         }
@@ -832,9 +851,9 @@ impl<'lua> Context<'lua> {
         }
     }
 
-    fn load_chunk(
+    fn load_chunk<'s, S: Iterator<Item = &'s [u8]>>(
         &self,
-        source: &[u8],
+        source: S,
         name: Option<&CString>,
         env: Option<Value<'lua>>,
         binary: bool,
@@ -845,23 +864,29 @@ impl<'lua> Context<'lua> {
             let _sg = StackGuard::new(self.state);
             assert_stack(self.state, 1);
 
-            match if let Some(name) = name {
-                ffi::luaL_loadbufferx(
+            #[allow(non_snake_case)]
+            unsafe extern "C" fn lua_Reader<'s, S: Iterator<Item = &'s [u8]>>(_state: *mut ffi::lua_State, data: *mut c_void, size: *mut usize) -> *const c_char {
+                debug_assert!(!data.is_null());
+                let source: &mut S = &mut *(data as *mut _);
+
+                if let Some(source) = source.next() {
+                    *size = source.len();
+                    source.as_ptr() as *const _
+
+                } else {
+                    *size = 0;
+                    ptr::null_mut()
+                }
+            }
+
+            match ffi::lua_load(
                     self.state,
-                    source.as_ptr() as *const c_char,
-                    source.len(),
-                    name.as_ptr() as *const c_char,
+                    lua_Reader::<'s, S>,
+                    &source as *const _ as _,
+                    if let Some(name) = name { name.as_ptr() as *const c_char } else { ptr::null() },
                     mode,
                 )
-            } else {
-                ffi::luaL_loadbufferx(
-                    self.state,
-                    source.as_ptr() as *const c_char,
-                    source.len(),
-                    ptr::null(),
-                    mode,
-                )
-            } {
+            {
                 ffi::LUA_OK => {
                     if let Some(env) = env {
                         self.push_value(env)?;
@@ -875,20 +900,21 @@ impl<'lua> Context<'lua> {
     }
 }
 
-/// Returned from [`Context::load`] and is used to finalize loading and executing Lua main chunks.
+/// Returned from [`Context::load`] / [`Context::load_ex`] and is used to finalize loading and executing Lua main chunks.
 ///
 /// [`Context::load`]: struct.Context.html#method.load
+/// [`Context::load_ex`]: struct.Context.html#method.load_ex
 #[must_use = "`Chunk`s do nothing unless one of `exec`, `eval`, `call`, or `into_function` are called on them"]
-pub struct Chunk<'lua, 'a> {
+pub struct Chunk<'lua, 's, S: Iterator<Item = &'s [u8]>> {
     context: Context<'lua>,
-    source: &'a [u8],
+    source: S,
     name: Option<CString>,
     env: Option<Value<'lua>>,
 }
 
-impl<'lua, 'a> Chunk<'lua, 'a> {
+impl<'lua, 's, S: Iterator<Item = &'s [u8]>> Chunk<'lua, 's, S> {
     /// Sets the name of this chunk, which results in more informative error traces.
-    pub fn set_name<S: ?Sized + AsRef<[u8]>>(mut self, name: &S) -> Result<Chunk<'lua, 'a>> {
+    pub fn set_name<N: ?Sized + AsRef<[u8]>>(mut self, name: &N) -> Result<Self> {
         let name =
             CString::new(name.as_ref().to_vec()).map_err(|e| Error::ToLuaConversionError {
                 from: "&str",
@@ -910,7 +936,7 @@ impl<'lua, 'a> Chunk<'lua, 'a> {
     /// All global variables (including the standard library!) are looked up in `_ENV`, so it may be
     /// necessary to populate the environment in order for scripts using custom environments to be
     /// useful.
-    pub fn set_environment<V: ToLua<'lua>>(mut self, env: V) -> Result<Chunk<'lua, 'a>> {
+    pub fn set_environment<V: ToLua<'lua>>(mut self, env: V) -> Result<Self> {
         self.env = Some(env.to_lua(self.context)?);
         Ok(self)
     }
@@ -921,27 +947,6 @@ impl<'lua, 'a> Chunk<'lua, 'a> {
     pub fn exec(self) -> Result<()> {
         self.call(())?;
         Ok(())
-    }
-
-    /// Evaluate the chunk as either an expression or block.
-    ///
-    /// If the chunk can be parsed as an expression, this loads and executes the chunk and returns
-    /// the value that it evaluates to.  Otherwise, the chunk is interpreted as a block as normal,
-    /// and this is equivalent to calling `exec`.
-    pub fn eval<R: FromLuaMulti<'lua>>(self) -> Result<R> {
-        // First, try interpreting the lua as an expression by adding
-        // "return", then as a statement.  This is the same thing the
-        // actual lua repl does.
-        let mut expression_source = b"return ".to_vec();
-        expression_source.extend(self.source);
-        if let Ok(function) =
-            self.context
-                .load_chunk(&expression_source, self.name.as_ref(), self.env.clone(), false)
-        {
-            function.call(())
-        } else {
-            self.call(())
-        }
     }
 
     /// Load the chunk function and call it with the given arguemnts.
@@ -968,6 +973,34 @@ impl<'lua, 'a> Chunk<'lua, 'a> {
     pub unsafe fn into_function_binary(self) -> Result<Function<'lua>> {
         self.context
             .load_chunk(self.source, self.name.as_ref(), self.env, true)
+    }
+}
+
+impl<'lua, 's, S: Iterator<Item = &'s [u8]> + Clone> Chunk<'lua, 's, S> {
+    /// Evaluate the chunk as either an expression or block.
+    ///
+    /// If the chunk can be parsed as an expression, this loads and executes the chunk and returns
+    /// the value that it evaluates to.  Otherwise, the chunk is interpreted as a block as normal,
+    /// and this is equivalent to calling `exec`.
+    pub fn eval<R: FromLuaMulti<'lua>>(self) -> Result<R> {
+        // First, try interpreting the lua as an expression by adding
+        // "return", then as a statement.  This is the same thing the
+        // actual lua repl does.
+        let expression_source = once(b"return " as &[u8]).chain(self.source.clone());
+
+        if let Ok(function) =
+            self.context
+                .load_chunk(
+                    expression_source,
+                    self.name.as_ref(),
+                    self.env.clone(),
+                    false
+                )
+        {
+            function.call(())
+        } else {
+            self.call(())
+        }
     }
 }
 
