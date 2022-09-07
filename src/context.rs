@@ -18,14 +18,17 @@ use crate::table::Table;
 use crate::thread::Thread;
 use crate::types::{Callback, Integer, LightUserData, LuaRef, Number, RegistryKey};
 use crate::userdata::{AnyUserData, MetaMethod, UserData, UserDataMethods};
+#[cfg(any(rlua_lua53, rlua_lua54))]
+use crate::util::isluainteger;
 use crate::util::{
     assert_stack, callback_error, check_stack, get_userdata, get_wrapped_error,
-    init_userdata_metatable, pop_error, protect_lua, protect_lua_closure, push_string,
-    push_userdata, push_wrapped_error, StackGuard,
+    init_userdata_metatable, pop_error, protect_lua, protect_lua_closure, push_globaltable,
+    push_string, push_userdata_uv, push_wrapped_error, tointegerx, tonumberx, StackGuard,
 };
+
 use crate::value::{FromLua, FromLuaMulti, MultiValue, Nil, ToLua, ToLuaMulti, Value};
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub struct Context<'lua> {
     pub(crate) state: *mut ffi::lua_State,
     _lua_invariant: Invariant<'lua>,
@@ -61,7 +64,7 @@ impl<'lua> Context<'lua> {
     /// called.
     ///
     /// [`Chunk::exec`]: struct.Chunk.html#method.exec
-    pub fn load_ex<'s, S: Iterator<Item = &'s [u8]>>(self, source: S) -> Chunk<'lua, 's, S> {
+    pub fn load_iter<'s, S: Iterator<Item = &'s [u8]>>(self, source: S) -> Chunk<'lua, 's, S> {
         Chunk {
             context: self,
             source,
@@ -248,7 +251,7 @@ impl<'lua> Context<'lua> {
         unsafe {
             let _sg = StackGuard::new(self.state);
             assert_stack(self.state, 2);
-            ffi::lua_rawgeti(self.state, ffi::LUA_REGISTRYINDEX, ffi::LUA_RIDX_GLOBALS);
+            push_globaltable(self.state);
             Table(self.pop_ref())
         }
     }
@@ -322,6 +325,7 @@ impl<'lua> Context<'lua> {
     /// Lua manual for details.
     pub fn coerce_integer(self, v: Value<'lua>) -> Result<Option<Integer>> {
         Ok(match v {
+            #[cfg(any(rlua_lua53, rlua_lua54))]
             Value::Integer(i) => Some(i),
             v => unsafe {
                 let _sg = StackGuard::new(self.state);
@@ -329,7 +333,7 @@ impl<'lua> Context<'lua> {
 
                 self.push_value(v)?;
                 let mut isint = 0;
-                let i = ffi::lua_tointegerx(self.state, -1, &mut isint);
+                let i = tointegerx(self.state, -1, &mut isint);
                 if isint == 0 {
                     None
                 } else {
@@ -353,7 +357,7 @@ impl<'lua> Context<'lua> {
 
                 self.push_value(v)?;
                 let mut isnum = 0;
-                let n = ffi::lua_tonumberx(self.state, -1, &mut isnum);
+                let n = tonumberx(self.state, -1, &mut isnum);
                 if isnum == 0 {
                     None
                 } else {
@@ -490,11 +494,14 @@ impl<'lua> Context<'lua> {
             let _sg = StackGuard::new(self.state);
             assert_stack(self.state, 2);
 
+            #[cfg(any(rlua_lua53, rlua_lua54))]
             ffi::lua_rawgeti(
                 self.state,
                 ffi::LUA_REGISTRYINDEX,
                 key.registry_id as ffi::lua_Integer,
             );
+            #[cfg(any(rlua_lua51))]
+            ffi::lua_rawgeti(self.state, ffi::LUA_REGISTRYINDEX, key.registry_id as c_int);
             self.pop_value()
         };
         T::from_lua(value, self)
@@ -570,6 +577,7 @@ impl<'lua> Context<'lua> {
                 ffi::lua_pushlightuserdata(self.state, ud.0);
             }
 
+            #[cfg(any(rlua_lua53, rlua_lua54))]
             Value::Integer(i) => {
                 ffi::lua_pushinteger(self.state, i);
             }
@@ -627,8 +635,15 @@ impl<'lua> Context<'lua> {
             }
 
             ffi::LUA_TNUMBER => {
-                if ffi::lua_isinteger(self.state, -1) != 0 {
-                    let i = Value::Integer(ffi::lua_tointeger(self.state, -1));
+                #[cfg(any(rlua_lua51))]
+                {
+                    let n = Value::Number(ffi::lua_tonumber(self.state, -1));
+                    ffi::lua_pop(self.state, 1);
+                    n
+                }
+                #[cfg(any(rlua_lua53, rlua_lua54))]
+                if isluainteger(self.state, -1) != 0 {
+                    let i = Value::Integer(ffi::lua_tointeger(self.state, -1) as i64);
                     ffi::lua_pop(self.state, 1);
                     i
                 } else {
@@ -805,7 +820,7 @@ impl<'lua> Context<'lua> {
             let _sg = StackGuard::new(self.state);
             assert_stack(self.state, 4);
 
-            push_userdata::<Callback>(self.state, func)?;
+            push_userdata_uv::<Callback>(self.state, func, 1)?;
 
             ffi::lua_pushlightuserdata(
                 self.state,
@@ -815,7 +830,7 @@ impl<'lua> Context<'lua> {
             ffi::lua_setmetatable(self.state, -2);
 
             protect_lua_closure(self.state, 1, 1, |state| {
-                ffi::lua_pushcclosure(state, call_callback, 1);
+                ffi::lua_pushcclosure(state, Some(call_callback), 1);
             })?;
 
             Ok(Function(self.pop_ref()))
@@ -831,13 +846,16 @@ impl<'lua> Context<'lua> {
         assert_stack(self.state, 4);
 
         let ud_index = self.userdata_metatable::<T>()?;
-        push_userdata::<RefCell<T>>(self.state, RefCell::new(data))?;
-
+        let uvalues_count = data.get_uvalues_count();
+        push_userdata_uv::<RefCell<T>>(self.state, RefCell::new(data), uvalues_count)?;
+        #[cfg(any(rlua_lua53, rlua_lua54))]
         ffi::lua_rawgeti(
             self.state,
             ffi::LUA_REGISTRYINDEX,
             ud_index as ffi::lua_Integer,
         );
+        #[cfg(any(rlua_lua51))]
+        ffi::lua_rawgeti(self.state, ffi::LUA_REGISTRYINDEX, ud_index as c_int);
         ffi::lua_setmetatable(self.state, -2);
 
         Ok(AnyUserData(self.pop_ref()))
@@ -856,13 +874,16 @@ impl<'lua> Context<'lua> {
         source: S,
         name: Option<&CString>,
         env: Option<Value<'lua>>,
-        binary: bool,
+        allow_binary: bool,
     ) -> Result<Function<'lua>> {
-        let mode = if binary { cstr!("b") } else { cstr!("t") };
-
         unsafe {
             let _sg = StackGuard::new(self.state);
             assert_stack(self.state, 1);
+            let mode = if allow_binary {
+                cstr!("bt")
+            } else {
+                cstr!("t")
+            };
 
             #[allow(non_snake_case)]
             unsafe extern "C" fn lua_Reader_impl<'s, S: Iterator<Item = &'s [u8]>>(
@@ -883,7 +904,7 @@ impl<'lua> Context<'lua> {
 
             match ffi::lua_load(
                 self.state,
-                lua_Reader_impl::<'s, S>,
+                Some(lua_Reader_impl::<'s, S>),
                 &source as *const _ as _,
                 if let Some(name) = name {
                     name.as_ptr() as *const c_char
@@ -895,7 +916,13 @@ impl<'lua> Context<'lua> {
                 ffi::LUA_OK => {
                     if let Some(env) = env {
                         self.push_value(env)?;
+                        #[cfg(any(rlua_lua53, rlua_lua54))]
                         ffi::lua_setupvalue(self.state, -2, 1);
+                        #[cfg(rlua_lua51)]
+                        {
+                            let res = ffi::lua_setfenv(self.state, -2);
+                            debug_assert!(res == 1);
+                        }
                     }
                     Ok(Function(self.pop_ref()))
                 }
@@ -905,10 +932,10 @@ impl<'lua> Context<'lua> {
     }
 }
 
-/// Returned from [`Context::load`] / [`Context::load_ex`] and is used to finalize loading and executing Lua main chunks.
+/// Returned from [`Context::load`] / [`Context::load_iter`] and is used to finalize loading and executing Lua main chunks.
 ///
 /// [`Context::load`]: struct.Context.html#method.load
-/// [`Context::load_ex`]: struct.Context.html#method.load_ex
+/// [`Context::load_iter`]: struct.Context.html#method.load_iter
 #[must_use = "`Chunk`s do nothing unless one of `exec`, `eval`, `call`, or `into_function` are called on them"]
 pub struct Chunk<'lua, 's, S: Iterator<Item = &'s [u8]>> {
     context: Context<'lua>,
@@ -971,38 +998,15 @@ impl<'lua, 's, S: Iterator<Item = &'s [u8]>> Chunk<'lua, 's, S> {
 
     /// Load this chunk into a regular `Function`.
     ///
-    /// This simply loads the precompiled, binary chunk without actually executing it.
-    ///
-    /// It's up to the user to ensure that the chunk contains valid bytecode
-    /// (like that obtained by [`Function::dump`](struct.Function.html#method.dump)).
-    pub unsafe fn into_function_binary(self) -> Result<Function<'lua>> {
+    /// This simply compiles the chunk without actually executing it.
+    /// Unlike `into_function`, this method allows loading code previously
+    /// compiled and saved with `Function::dump` or `string.dump()`.
+    /// This method is unsafe because there is no check that the precompiled
+    /// Lua code is valid; if it is not this may cause a crash or other
+    /// undefined behaviour.
+    pub unsafe fn into_function_allow_binary(self) -> Result<Function<'lua>> {
         self.context
             .load_chunk(self.source, self.name.as_ref(), self.env, true)
-    }
-}
-
-impl<'lua, 's, S: Iterator<Item = &'s [u8]> + Clone> Chunk<'lua, 's, S> {
-    /// Evaluate the chunk as either an expression or block.
-    ///
-    /// If the chunk can be parsed as an expression, this loads and executes the chunk and returns
-    /// the value that it evaluates to.  Otherwise, the chunk is interpreted as a block as normal,
-    /// and this is equivalent to calling `exec`.
-    pub fn eval<R: FromLuaMulti<'lua>>(self) -> Result<R> {
-        // First, try interpreting the lua as an expression by adding
-        // "return", then as a statement.  This is the same thing the
-        // actual lua repl does.
-        let expression_source = once(b"return " as &[u8]).chain(self.source.clone());
-
-        if let Ok(function) = self.context.load_chunk(
-            expression_source,
-            self.name.as_ref(),
-            self.env.clone(),
-            false,
-        ) {
-            function.call(())
-        } else {
-            self.call(())
-        }
     }
 }
 
@@ -1021,6 +1025,30 @@ unsafe fn ref_stack_pop(extra: *mut ExtraData) -> c_int {
         }
         (*extra).ref_stack_max += 1;
         (*extra).ref_stack_max
+    }
+}
+
+impl<'lua, 's, S: Iterator<Item = &'s [u8]> + Clone> Chunk<'lua, 's, S> {
+    /// Evaluate the chunk as either an expression or block.
+    ///
+    /// If the chunk can be parsed as an expression, this loads and executes the chunk and returns
+    /// the value that it evaluates to.  Otherwise, the chunk is interpreted as a block as normal,
+    /// and this is equivalent to calling `exec`.
+    pub fn eval<R: FromLuaMulti<'lua>>(self) -> Result<R> {
+        // First, try interpreting the lua as an expression by adding
+        // "return", then as a statement.  This is the same thing the
+        // actual lua repl does.
+        let expression_source = once(b"return " as &[u8]).chain(self.source.clone());
+        if let Ok(function) = self.context.load_chunk(
+            expression_source,
+            self.name.as_ref(),
+            self.env.clone(),
+            false,
+        ) {
+            function.call(())
+        } else {
+            self.call(())
+        }
     }
 }
 

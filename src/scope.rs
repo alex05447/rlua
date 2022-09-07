@@ -13,8 +13,8 @@ use crate::markers::Invariant;
 use crate::types::{Callback, LuaRef};
 use crate::userdata::{AnyUserData, MetaMethod, UserData, UserDataMethods};
 use crate::util::{
-    assert_stack, init_userdata_metatable, protect_lua_closure, push_string, push_userdata,
-    take_userdata, StackGuard,
+    assert_stack, getiuservalue, init_userdata_metatable, protect_lua_closure, push_string,
+    push_userdata_uv, setiuservalue, take_userdata, StackGuard,
 };
 use crate::value::{FromLuaMulti, MultiValue, ToLuaMulti, Value};
 
@@ -24,6 +24,7 @@ use crate::value::{FromLuaMulti, MultiValue, ToLuaMulti, Value};
 /// See [`Context::scope`] for more details.
 ///
 /// [`Context::scope`]: struct.Context.html#method.scope
+#[derive(Debug)]
 pub struct Scope<'lua, 'scope> {
     lua: Context<'lua>,
     destructors: RefCell<Vec<(LuaRef<'lua>, fn(LuaRef<'lua>) -> Box<dyn Any>)>>,
@@ -174,7 +175,14 @@ impl<'lua, 'scope> Scope<'lua, 'scope> {
                         unsafe {
                             assert_stack(lua.state, 1);
                             lua.push_ref(&u.0);
-                            ffi::lua_getuservalue(lua.state, -1);
+                            getiuservalue(lua.state, -1, 1);
+                            #[cfg(rlua_lua51)]
+                            {
+                                // For lua 5.1 we wrap the lightuserdata in a table - extract it
+                                // and remove the table from the stack.
+                                ffi::lua_rawgeti(lua.state, -1, 1);
+                                ffi::lua_remove(lua.state, -2);
+                            }
                             return ffi::lua_touserdata(lua.state, -1)
                                 == check_data.as_ptr() as *mut c_void;
                         }
@@ -238,9 +246,21 @@ impl<'lua, 'scope> Scope<'lua, 'scope> {
             let _sg = StackGuard::new(lua.state);
             assert_stack(lua.state, 6);
 
-            push_userdata(lua.state, ())?;
+            // We need a single user value here for the data pointer
+            // TODO: is there any need for additional user values within this userdata?
+            push_userdata_uv(lua.state, (), 1)?;
+            #[cfg(any(rlua_lua53, rlua_lua54))]
             ffi::lua_pushlightuserdata(lua.state, data.as_ptr() as *mut c_void);
-            ffi::lua_setuservalue(lua.state, -2);
+            #[cfg(rlua_lua51)]
+            {
+                // We have implemented setiuservalue in terms of lua_setfenv for Lua 5.1;
+                // lua_setfenv only allows setting a table as the environment - so we
+                // need to wrap the lightuserdata in a table.
+                ffi::lua_newtable(lua.state);
+                ffi::lua_pushlightuserdata(lua.state, data.as_ptr() as *mut c_void);
+                ffi::lua_rawseti(lua.state, -2, 1);
+            }
+            setiuservalue(lua.state, -2, 1);
 
             protect_lua_closure(lua.state, 0, 1, move |state| {
                 ffi::lua_newtable(state);

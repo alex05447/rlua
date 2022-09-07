@@ -1,3 +1,5 @@
+#[cfg(rlua_lua54)]
+use std::os::raw::c_int;
 use std::sync::Arc;
 
 use rlua::{
@@ -9,8 +11,8 @@ fn test_user_data() {
     struct UserData1(i64);
     struct UserData2(Box<i64>);
 
-    impl UserData for UserData1 {};
-    impl UserData for UserData2 {};
+    impl UserData for UserData1 {}
+    impl UserData for UserData2 {}
 
     Lua::new().context(|lua| {
         let userdata1 = lua.create_userdata(UserData1(1)).unwrap();
@@ -178,6 +180,32 @@ fn detroys_userdata() {
     assert_eq!(Arc::strong_count(&rc), 1);
 }
 
+#[cfg(rlua_lua54)]
+#[test]
+fn user_value() {
+    struct MyUserData;
+    impl UserData for MyUserData {
+        fn get_uvalues_count(&self) -> c_int {
+            2
+        }
+    }
+
+    Lua::new().context(|lua| {
+        let ud = lua.create_userdata(MyUserData).unwrap();
+        ud.set_i_user_value("hello", 1).unwrap();
+        ud.set_i_user_value("world", 2).unwrap();
+        assert_eq!(ud.get_i_user_value::<String>(1).unwrap(), "hello");
+        assert_eq!(ud.get_i_user_value::<String>(2).unwrap(), "world");
+        assert!(ud.get_i_user_value::<u32>(1).is_err());
+        assert!(ud.get_i_user_value::<u32>(2).is_err());
+        assert!(ud.get_i_user_value::<String>(0).is_err());
+        assert!(ud.get_i_user_value::<String>(3).is_err());
+        assert!(ud.get_i_user_value::<u32>(0).is_err());
+        assert!(ud.get_i_user_value::<u32>(3).is_err());
+    });
+}
+
+#[cfg(rlua_lua53)]
 #[test]
 fn user_value() {
     struct MyUserData;
@@ -185,12 +213,18 @@ fn user_value() {
 
     Lua::new().context(|lua| {
         let ud = lua.create_userdata(MyUserData).unwrap();
-        ud.set_user_value("hello").unwrap();
-        assert_eq!(ud.get_user_value::<String>().unwrap(), "hello");
-        assert!(ud.get_user_value::<u32>().is_err());
+        ud.set_i_user_value("hello", 1).unwrap();
+        assert!(ud.set_i_user_value("world", 2).is_err());
+        assert_eq!(ud.get_i_user_value::<String>(1).unwrap(), "hello");
+        assert!(ud.get_i_user_value::<String>(2).is_err());
+        assert!(ud.get_i_user_value::<u32>(1).is_err());
+        assert!(ud.get_i_user_value::<u32>(2).is_err());
+        assert!(ud.get_i_user_value::<String>(0).is_err());
+        assert!(ud.get_i_user_value::<String>(3).is_err());
+        assert!(ud.get_i_user_value::<u32>(0).is_err());
+        assert!(ud.get_i_user_value::<u32>(3).is_err());
     });
 }
-
 #[test]
 fn test_functions() {
     struct MyUserData(i64);

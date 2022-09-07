@@ -1,11 +1,14 @@
-use std::os::raw::{c_int, c_void};
+use std::os::raw::c_int;
 use std::ptr;
+
+use libc::c_void;
 
 use crate::error::{Error, Result};
 use crate::ffi;
 use crate::types::LuaRef;
 use crate::util::{
-    assert_stack, check_stack, error_traceback, pop_error, protect_lua_closure, StackGuard,
+    assert_stack, check_stack, dump, error_traceback, pop_error, protect_lua_closure, rotate,
+    StackGuard,
 };
 use crate::value::{FromLuaMulti, MultiValue, ToLuaMulti};
 
@@ -66,14 +69,14 @@ impl<'lua> Function<'lua> {
             let _sg = StackGuard::new(lua.state);
             check_stack(lua.state, nargs + 3)?;
 
-            ffi::lua_pushcfunction(lua.state, error_traceback);
+            ffi::lua_pushcfunction(lua.state, Some(error_traceback));
             let stack_start = ffi::lua_gettop(lua.state);
             lua.push_ref(&self.0);
             for arg in args {
                 lua.push_value(arg)?;
             }
             let ret = ffi::lua_pcall(lua.state, nargs, ffi::LUA_MULTRET, stack_start);
-            if ret != ffi::LUA_OK {
+            if ret != ffi::LUA_OK as i32 {
                 return Err(pop_error(lua.state, ret));
             }
             let nresults = ffi::lua_gettop(lua.state) - stack_start;
@@ -122,7 +125,7 @@ impl<'lua> Function<'lua> {
             ffi::luaL_checkstack(state, nbinds + 2, ptr::null());
 
             ffi::lua_settop(state, nargs + nbinds + 1);
-            ffi::lua_rotate(state, -(nargs + nbinds + 1), nbinds + 1);
+            rotate(state, -(nargs + nbinds + 1), nbinds + 1);
 
             ffi::lua_pushvalue(state, ffi::lua_upvalueindex(1));
             ffi::lua_replace(state, 1);
@@ -155,63 +158,65 @@ impl<'lua> Function<'lua> {
             }
 
             protect_lua_closure(lua.state, nargs + 2, 1, |state| {
-                ffi::lua_pushcclosure(state, bind_call_impl, nargs + 2);
+                ffi::lua_pushcclosure(state, Some(bind_call_impl), nargs + 2);
             })?;
 
             Ok(Function(lua.pop_ref()))
         }
     }
 
-    /// Dumps the function bytecode using [`lua_dump`](https://www.lua.org/manual/5.3/manual.html#lua_dump).
-    pub fn dump(&self) -> Result<Box<[u8]>> {
+    /// Dumps the compiled representation of the function into a binary blob,
+    /// which can later be loaded using the unsafe Chunk::into_function_allow_binary().
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use rlua::{Lua, Function, Result};
+    /// # fn main() -> Result<()> {
+    /// # Lua::new().context(|lua_context| {
+    /// let add2: Function = lua_context.load(r#"
+    ///     function(a)
+    ///         return a + 2
+    ///     end
+    /// "#).eval()?;
+    ///
+    /// let dumped = add2.dump()?;
+    ///
+    /// let reloaded = unsafe {
+    ///     lua_context.load(&dumped)
+    ///                .into_function_allow_binary()?
+    /// };
+    /// assert_eq!(reloaded.call::<_, u32>(7)?, 7+2);
+    ///
+    /// # Ok(())
+    /// # })
+    /// # }
+    /// ```
+    pub fn dump(&self) -> Result<Vec<u8>> {
+        unsafe extern "C" fn writer(
+            _state: *mut ffi::lua_State,
+            p: *const c_void,
+            sz: usize,
+            ud: *mut c_void,
+        ) -> c_int {
+            let input_slice = std::slice::from_raw_parts(p as *const u8, sz);
+            let vec = &mut *(ud as *mut Vec<u8>);
+            vec.extend_from_slice(input_slice);
+            0
+        }
         let lua = self.0.lua;
-
-        let bytes = unsafe {
+        let mut bytes = Vec::new();
+        unsafe {
             let _sg = StackGuard::new(lua.state);
             check_stack(lua.state, 1)?;
-
-            lua.push_ref(&self.0);
-
-            let mut bytes = Vec::<u8>::new();
-
-            let ud = &mut bytes as *const _ as *mut c_void;
-
-            let ret = ffi::lua_dump(lua.state, lua_Writer_impl, ud, 1);
-
-            if ret != ffi::LUA_OK {
-                return Err(Error::MemoryError(
-                    "Failed to write the function bytecode - out of memory?".to_owned(),
-                ));
-            }
-
-            bytes.into_boxed_slice()
-        };
-
-        Ok(bytes)
-    }
-}
-
-#[allow(non_snake_case)]
-unsafe extern "C" fn lua_Writer_impl(
-    _state: *mut ffi::lua_State,
-    p: *const c_void,
-    sz: usize,
-    ud: *mut c_void,
-) -> c_int {
-    use std::io::Write;
-
-    let bytes: &mut Vec<u8> = &mut *(ud as *mut _);
-
-    let src: &[u8] = std::slice::from_raw_parts(p as *const _, sz);
-
-    match bytes.write(src) {
-        Ok(written) => {
-            if written == sz {
-                0
-            } else {
-                1
-            }
+            let bytes_ptr = &mut bytes as *mut _;
+            protect_lua_closure(lua.state, 0, 0, |state| {
+                lua.push_ref(&self.0);
+                let dump_result = dump(state, Some(writer), bytes_ptr as *mut c_void, 0);
+                // It can only return an error from our writer.
+                debug_assert_eq!(dump_result, 0);
+            })?;
         }
-        Err(_) => 1,
+        Ok(bytes)
     }
 }

@@ -1,10 +1,11 @@
 use std::cell::{Ref, RefCell, RefMut};
+use std::os::raw::c_int;
 
 use crate::context::Context;
 use crate::error::{Error, Result};
 use crate::ffi;
 use crate::types::LuaRef;
-use crate::util::{assert_stack, get_userdata, StackGuard};
+use crate::util::{assert_stack, get_userdata, getiuservalue, setiuservalue, StackGuard};
 use crate::value::{FromLua, FromLuaMulti, ToLua, ToLuaMulti};
 
 /// Kinds of metamethods that can be overridden.
@@ -63,6 +64,10 @@ pub enum MetaMethod {
     ///
     /// This is not an operator, but will be called by methods such as `tostring` and `print`.
     ToString,
+    /// The `__pairs` metamethod.
+    ///
+    /// This is not an operator, but it will be called by the built-in `pairs` function.
+    Pairs,
 }
 
 impl MetaMethod {
@@ -91,6 +96,7 @@ impl MetaMethod {
             MetaMethod::NewIndex => b"__newindex",
             MetaMethod::Call => b"__call",
             MetaMethod::ToString => b"__tostring",
+            MetaMethod::Pairs => b"__pairs",
         }
     }
 }
@@ -273,6 +279,12 @@ pub trait UserDataMethods<'lua, T: UserData> {
 pub trait UserData: Sized {
     /// Adds custom methods and operators specific to this userdata.
     fn add_methods<'lua, T: UserDataMethods<'lua, Self>>(_methods: &mut T) {}
+
+    /// Used to determine how many user values this userdata should have.
+    /// Defaults to a single user value.
+    fn get_uvalues_count(&self) -> c_int {
+        1
+    }
 }
 
 /// Handle to an internal Lua userdata for any type that implements [`UserData`].
@@ -330,10 +342,21 @@ impl<'lua> AnyUserData<'lua> {
 
     /// Sets an associated value to this `AnyUserData`.
     ///
-    /// The value may be any Lua value whatsoever, and can be retrieved with [`get_user_value`].
+    /// The value may be any Lua value whatsoever, and can be retrieved with [`AnyUserData::get_user_value`].
     ///
-    /// [`get_user_value`]: #method.get_user_value
+    /// Equivalent to set_i_user_value(v, 1)
+    ///
+    /// [`get_i_user_value`]: #method.get_i_user_value
     pub fn set_user_value<V: ToLua<'lua>>(&self, v: V) -> Result<()> {
+        self.set_i_user_value(v, 1)
+    }
+
+    /// Sets an associated value to this `AnyUserData`.
+    ///
+    /// The value may be any Lua value whatsoever, and can be retrieved with [`get_i_user_value`].
+    ///
+    /// [`get_i_user_value`]: #method.get_i_user_value
+    pub fn set_i_user_value<V: ToLua<'lua>>(&self, v: V, n: c_int) -> Result<()> {
         let lua = self.0.lua;
         let v = v.to_lua(lua)?;
         unsafe {
@@ -341,8 +364,14 @@ impl<'lua> AnyUserData<'lua> {
             assert_stack(lua.state, 2);
             lua.push_ref(&self.0);
             lua.push_value(v)?;
-            ffi::lua_setuservalue(lua.state, -2);
-            Ok(())
+            if setiuservalue(lua.state, -2, n) == 0 {
+                Err(Error::RuntimeError(format!(
+                    "userdata does not have user value {}",
+                    n
+                )))
+            } else {
+                Ok(())
+            }
         }
     }
 
@@ -350,12 +379,25 @@ impl<'lua> AnyUserData<'lua> {
     ///
     /// [`set_user_value`]: #method.set_user_value
     pub fn get_user_value<V: FromLua<'lua>>(&self) -> Result<V> {
+        self.get_i_user_value(1)
+    }
+
+    /// Returns an associated value set by [`set_i_user_value`].
+    ///
+    /// [`set_i_user_value`]: #method.set_i_user_value
+    pub fn get_i_user_value<V: FromLua<'lua>>(&self, n: c_int) -> Result<V> {
         let lua = self.0.lua;
         let res = unsafe {
             let _sg = StackGuard::new(lua.state);
             assert_stack(lua.state, 3);
             lua.push_ref(&self.0);
-            ffi::lua_getuservalue(lua.state, -1);
+            if getiuservalue(lua.state, -1, n) == ffi::LUA_TNIL {
+                lua.pop_value(); // remove the nil from the stack
+                return Err(Error::RuntimeError(format!(
+                    "userdata does not have user value {}",
+                    n
+                )));
+            }
             lua.pop_value()
         };
         V::from_lua(res, lua)
@@ -376,10 +418,17 @@ impl<'lua> AnyUserData<'lua> {
             if ffi::lua_getmetatable(lua.state, -1) == 0 {
                 Err(Error::UserDataTypeMismatch)
             } else {
+                #[cfg(any(rlua_lua53, rlua_lua54))]
                 ffi::lua_rawgeti(
                     lua.state,
                     ffi::LUA_REGISTRYINDEX,
                     lua.userdata_metatable::<T>()? as ffi::lua_Integer,
+                );
+                #[cfg(any(rlua_lua51))]
+                ffi::lua_rawgeti(
+                    lua.state,
+                    ffi::LUA_REGISTRYINDEX,
+                    lua.userdata_metatable::<T>()? as c_int,
                 );
 
                 if ffi::lua_rawequal(lua.state, -1, -2) == 0 {

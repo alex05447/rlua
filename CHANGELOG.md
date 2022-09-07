@@ -1,3 +1,52 @@
+## [0.19.1]
+- The -sys crates (bumped to 0.1.1) now use pregenerated bindgen outputs in the
+  package instead of running bindgen at build time.  This means that libclang is
+  no longer needed when building.
+- A Windows build has been added to CI.
+
+## [0.19.0]
+- The Lua C library build now uses separate -sys crates, and bindgen rather than
+  hand-maintained declarations.  (Thanks @pollend!)  The "builtin-lua51" feature
+  is now available.
+- Value::Integer is now no longer available when building for Lua 5.1.  (In Lua 5.1
+  there is no integer type).
+- Add `Function::dump()` which produces the compiled version of a function (like
+  the `string.dump` Lua function or `lua_dump()` C API).
+- Add unsafe `Chunk::into_function_allow_binary()`.  This allows loading a compiled
+  binary generated from `Function::dump()`.
+- Add `Initflags` to control some settings done when `Lua` is initialised.  They
+  can be specified with the new unsafe `Lua::unsafe_new_with_flags()` constructor.
+  The flags available (all set by default with the other constructors):
+  * PCALL_WRAPPERS:
+    - wrap pcall and xpcall so that they don't allow catching Rust panics
+  * LOAD_WRAPPERS:
+    - wrap functions load, loadfile, dofile (and loadstring for lua 5.1) to prevent
+      loading compiled/bytecode modules.
+  * REMOVE_LOADLIB:
+    - Remove `package.loadlib` and the module finding functions which allow loading
+      compiled C libraries.
+- `String<'lua>` now implements `Eq` and `Hash` (can be useful for local collections
+  within a context callback).
+
+## [0.18.0]
+- Add support for multiple Lua versions, including 5.1, 5.3 and 5.4 (the default)
+- Add implementations of `FromLua` and `ToLua` for `[T;N]`.
+
+## [0.17.1]
+- Add "lua-compat-mathlib" feature, which enables Lua's LUA_COMPAT_MATHLIB
+  option.
+- Bump num-traits version to 0.2.14 and fix some incompatibilities
+- Fix some tests from improved diagnostics in recent rustc.
+
+## [0.17]
+- API incompatible change: depend on `bstr` crate and implement `ToLua` /
+  `FromLua` for `BString` and `BStr` types (thanks @azdle!)
+- Add methods (`Lua::[unsafe]_load_from_stdlib` load from the Lua stdlib on an
+  existing instance (thanks @azdle!)
+- Actually print the cause error in `Error::CallbackError` (thanks @LPGhatguy!)
+- API incompatible change: Add `MetaMethod::Pairs` for the metamethod used by
+  the bult-in `pairs` function (thanks @steven-aerts!)
+
 ## [0.16.3]
 - Add a `Context::current_thread` method to get a reference to the `Thread`
   backing a given `Context`.

@@ -1,11 +1,19 @@
-version: 2
+version: 2.1
+
+orbs:
+  win: circleci/windows@2.2.0
 
 jobs:
-  build:
+  build-default:
     docker:
       - image: circleci/rust:latest
     steps:
       - checkout
+      - run:
+          name: Install libclang for bindgen
+          command: |
+            sudo apt-get update
+            sudo apt-get install libclang-dev clang
       - run:
           name: Version information
           command: rustc --version; cargo --version; rustup --version
@@ -16,17 +24,23 @@ jobs:
           keys:
             - cargo-cache-{{ arch }}-{{ checksum "Cargo.lock" }}
       - run:
-          name: Check Formatting
-          command: |
-              rustup component add rustfmt
-              rustfmt --version
-              cargo fmt --all -- --check --color=auto
-      - run:
           name: Build all targets
           command: cargo build --all --all-targets
       - run:
           name: Run all tests
           command: cargo test --all
+      - run:
+          name: Check bindgen
+          command: |
+              cargo install bindgen
+              scripts/update-bindgen.sh
+              git diff --exit-code
+      - run:
+          name: Check Formatting
+          command: |
+              rustup component add rustfmt
+              rustfmt --version
+              cargo fmt --all -- --check --color=auto
       - save_cache:
           paths:
             - /usr/local/cargo/registry
@@ -34,3 +48,141 @@ jobs:
             - target/debug/build
             - target/debug/deps
           key: cargo-cache-{{ arch }}-{{ checksum "Cargo.lock" }}
+  build-lua53:
+    docker:
+      - image: circleci/rust:latest
+    steps:
+      - checkout
+      - run:
+          name: Install libclang for bindgen
+          command: |
+            sudo apt-get update
+            sudo apt-get install libclang-dev clang
+      - run:
+          name: Version information
+          command: rustc --version; cargo --version; rustup --version
+      - run:
+          name: Calculate dependencies
+          command: cargo generate-lockfile
+      - restore_cache:
+          keys:
+            - cargo-cache-lua53-{{ arch }}-{{ checksum "Cargo.lock" }}
+      - run:
+          name: Build all targets
+          command: cargo build --no-default-features --features=builtin-lua53 --all --all-targets
+      - run:
+          name: Run all tests
+          command: cargo test --no-default-features --features=builtin-lua53 --all
+      - run:
+          name: Check bindgen
+          command: |
+              cargo install bindgen
+              scripts/update-bindgen.sh
+              git diff --exit-code
+      - run:
+          name: Check Formatting
+          command: |
+              rustup component add rustfmt
+              rustfmt --version
+              cargo fmt --all -- --check --color=auto
+      - save_cache:
+          paths:
+            - /usr/local/cargo/registry
+            - target/debug/.fingerprint
+            - target/debug/build
+            - target/debug/deps
+          key: cargo-cache-lua53-{{ arch }}-{{ checksum "Cargo.lock" }}
+  build-lua51:
+    docker:
+      - image: circleci/rust:latest
+    steps:
+      - checkout
+      - run:
+          name: Install libclang for bindgen
+          command: |
+            sudo apt-get update
+            sudo apt-get install libclang-dev clang
+      - run:
+          name: Install Lua
+          command: |
+            sudo apt-get update -yqq
+            sudo apt-get install -yqq liblua5.1-0-dev
+            sudo apt-get clean
+      - run:
+          name: Version information
+          command: rustc --version; cargo --version; rustup --version
+      - run:
+          name: Calculate dependencies
+          command: cargo generate-lockfile
+      - restore_cache:
+          keys:
+            - cargo-cache-lua51-{{ arch }}-{{ checksum "Cargo.lock" }}
+      - run:
+          name: Build all targets
+          command: cargo build --no-default-features --features=system-lua51 --all --all-targets
+      - run:
+          name: Run all tests
+          command: cargo test --no-default-features --features=system-lua51 --all
+      - run:
+          name: Check bindgen
+          command: |
+              cargo install bindgen
+              scripts/update-bindgen.sh
+              git diff --exit-code
+      - run:
+          name: Check Formatting
+          command: |
+              rustup component add rustfmt
+              rustfmt --version
+              cargo fmt --all -- --check --color=auto
+      - save_cache:
+          paths:
+            - /usr/local/cargo/registry
+            - target/debug/.fingerprint
+            - target/debug/build
+            - target/debug/deps
+          key: cargo-cache-lua51-{{ arch }}-{{ checksum "Cargo.lock" }}
+  build-windows:
+    executor:
+      name: win/default
+      size: "medium"
+      shell: bash.exe
+    steps:
+      - checkout
+      - run:
+          name: Install Rust
+          command: |
+            curl https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe --output rustup-init.exe
+            ./rustup-init.exe -y
+      - run:
+          name: Version information
+          command: |
+            export PATH=$USERPROFILE/.cargo/bin:$PATH
+            rustc --version; cargo --version; rustup --version
+      - run:
+          name: Calculate dependencies
+          command: |
+            export PATH=$USERPROFILE/.cargo/bin:$PATH
+            echo "[net]" >> $USERPROFILE/.cargo/config
+            echo "git-fetch-with-cli = true" >> $USERPROFILE/.cargo/config
+            cargo generate-lockfile
+      - run:
+          name: Build all targets
+          command: |
+            export PATH=$USERPROFILE/.cargo/bin:$PATH
+            cargo build --all --all-targets
+      - run:
+          name: Run all tests
+          command: |
+            export PATH=$USERPROFILE/.cargo/bin:$PATH
+            cargo test --all
+
+
+workflows:
+  version: 2
+  build:
+    jobs:
+      - "build-default"
+      - "build-lua53"
+      - "build-lua51"
+      - "build-windows"

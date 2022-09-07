@@ -43,10 +43,15 @@
 #[macro_use]
 mod macros;
 
+#[cfg(rlua_lua51)]
+extern crate rlua_lua51_sys as ffi;
+#[cfg(rlua_lua53)]
+extern crate rlua_lua53_sys as ffi;
+#[cfg(rlua_lua54)]
+extern crate rlua_lua54_sys as ffi;
 mod context;
 mod conversion;
 mod error;
-mod ffi;
 mod function;
 mod hook;
 mod lua;
@@ -65,7 +70,7 @@ pub use crate::context::{Chunk, Context};
 pub use crate::error::{Error, ExternalError, ExternalResult, Result};
 pub use crate::function::Function;
 pub use crate::hook::{Debug, DebugNames, DebugSource, DebugStack, HookTriggers};
-pub use crate::lua::{Lua, StdLib};
+pub use crate::lua::{InitFlags, Lua, StdLib};
 pub use crate::multi::Variadic;
 pub use crate::scope::Scope;
 pub use crate::string::String;

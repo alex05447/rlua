@@ -12,11 +12,11 @@ use crate::util::callback_error;
 /// The `Debug` structure is provided as a parameter to the hook function set with
 /// [`Lua::set_hook`].  You may call the methods on this structure to retrieve information about the
 /// Lua code executing at the time that the hook function was called.  Further information can be
-/// found in the [Lua 5.3 documentaton][lua_doc].
+/// found in the [Lua 5.4 documentaton][lua_doc].
 ///
-/// [lua_doc]: https://www.lua.org/manual/5.3/manual.html#lua_Debug
+/// [lua_doc]: https://www.lua.org/manual/5.4/manual.html#lua_Debug
 /// [`Lua::set_hook`]: struct.Lua.html#method.set_hook
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Debug<'a> {
     ar: *mut lua_Debug,
     state: *mut lua_State,
@@ -38,7 +38,7 @@ impl<'a> Debug<'a> {
         }
     }
 
-    /// Corresponds to the `n` what mask.
+    /// Corresponds to the `S` what mask.
     pub fn source(&self) -> DebugSource<'a> {
         unsafe {
             rlua_assert!(
@@ -87,7 +87,9 @@ impl<'a> Debug<'a> {
             );
             DebugStack {
                 num_ups: (*self.ar).nups as i32,
+                #[cfg(any(rlua_lua53, rlua_lua54))]
                 num_params: (*self.ar).nparams as i32,
+                #[cfg(any(rlua_lua53, rlua_lua54))]
                 is_vararg: (*self.ar).isvararg != 0,
             }
         }
@@ -112,7 +114,9 @@ pub struct DebugSource<'a> {
 #[derive(Copy, Clone, Debug)]
 pub struct DebugStack {
     pub num_ups: i32,
+    #[cfg(any(rlua_lua53, rlua_lua54))]
     pub num_params: i32,
+    #[cfg(any(rlua_lua53, rlua_lua54))]
     pub is_vararg: bool,
 }
 
