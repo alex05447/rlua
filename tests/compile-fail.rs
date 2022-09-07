@@ -1,6 +1,7 @@
-use std::path::PathBuf;
-
+#[cfg(all(test, target_os = "linux"))]
 fn run_mode(mode: &'static str) {
+    use std::path::PathBuf;
+
     let mut config = compiletest_rs::Config::default();
 
     config.mode = mode.parse().expect("Invalid mode");
